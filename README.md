@@ -23,6 +23,7 @@
 
 
 ## 🔥🔥🔥 News!!
+* June 13, 2025: 🚀 HunyuanCustom supports single GPU with only 8GB VRAM, many thanks to [WanGP](https://github.com/deepbeepmeep/Wan2GP).
 * June 6, 2025: 💃 We release the inference code and model weights of audio-driven and video-driven powered by [OmniV2V](https://arxiv.org/abs/2506.01801).
 * May 13, 2025: 🎉 HunyuanCustom has been integrated into [ComfyUI-HunyuanVideoWrapper](https://github.com/kijai/ComfyUI-HunyuanVideoWrapper/blob/develop/example_workflows/hyvideo_custom_testing_01.json) by [Kijai](https://github.com/kijai).
 * May 12, 2025: 🔥 HunyuanCustom is available in Cloud-Native-Build (CNB) [HunyuanCustom](https://cnb.cool/tencent/hunyuan/HunyuanCustom).
