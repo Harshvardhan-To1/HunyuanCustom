@@ -2,9 +2,62 @@ import os
 import torch
 import datetime
 import torch.distributed as dist
+import torch.nn.functional as F
 from typing import Any, Tuple
 from torch import Tensor
-from flash_attn.flash_attn_interface import flash_attn_varlen_func
+
+# Remove all flash attention imports and set availability flags to False
+FA2_AVAILABLE = False
+FA3_AVAILABLE = False
+print("FA2 is NOT available...")
+print("FA3 is NOT available...")
+
+
+def standard_attention_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p=0.0, causal=False):
+    """
+    Standard PyTorch attention implementation to replace flash_attn_varlen_func.
+    
+    Args:
+        q: Query tensor [total_seq_len, num_heads, head_dim]
+        k: Key tensor [total_seq_len, num_heads, head_dim]
+        v: Value tensor [total_seq_len, num_heads, head_dim]
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_kv: Cumulative sequence lengths for keys/values
+        max_seqlen_q: Maximum sequence length in batch for queries
+        max_seqlen_kv: Maximum sequence length in batch for keys/values
+        dropout_p: Dropout probability
+        causal: Whether to use causal attention
+        
+    Returns:
+        Tuple containing attention output tensor and None (for compatibility)
+    """
+    # Transpose to [num_heads, total_seq_len, head_dim] for attention computation
+    q = q.transpose(0, 1)  # [num_heads, total_seq_len, head_dim]
+    k = k.transpose(0, 1)  # [num_heads, total_seq_len, head_dim]
+    v = v.transpose(0, 1)  # [num_heads, total_seq_len, head_dim]
+    
+    # Use PyTorch's scaled_dot_product_attention
+    attn_output = F.scaled_dot_product_attention(
+        q, k, v, 
+        dropout_p=dropout_p,
+        is_causal=causal
+    )
+    
+    # Transpose back to [total_seq_len, num_heads, head_dim]
+    attn_output = attn_output.transpose(0, 1)
+    
+    return attn_output, None
+
+
+# Create replacement functions for flash attention variants
+def flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p=0.0, causal=False):
+    """Replacement for flash_attn_varlen_func using standard PyTorch attention."""
+    return standard_attention_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p, causal)
+
+
+def fa3_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p=0.0, causal=False):
+    """Replacement for FA3 varlen function using standard PyTorch attention."""
+    return standard_attention_varlen(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p, causal)
 
 
 class COMM_INFO:
@@ -339,7 +392,13 @@ def parallel_attention(q, k, v, img_q_len, img_kv_len, cu_seqlens_q, cu_seqlens_
             x.view(x.shape[0] * x.shape[1], *x.shape[2:])
             for x in [query, key, value]
         ]
-    hidden_states = flash_attn_varlen_func(
+    
+    # Use the standard attention function instead of flash attention
+    attn_func = flash_attn_varlen_func  # This now points to our standard implementation
+    if FA3_AVAILABLE:  # This will always be False now
+        attn_func = fa3_varlen_func
+
+    hidden_states = attn_func(
         query,
         key,
         value,
@@ -347,7 +406,8 @@ def parallel_attention(q, k, v, img_q_len, img_kv_len, cu_seqlens_q, cu_seqlens_
         cu_seqlens_kv,
         max_seqlen_q,
         max_seqlen_kv,
-    )
+    )[0]  # Get the first element since our function returns a tuple
+    
     # B, S, 3, H, D
     hidden_states = hidden_states.view(bsz, max_seqlen_q, head, head_dim).contiguous()
     
