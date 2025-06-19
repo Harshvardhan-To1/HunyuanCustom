@@ -5,12 +5,6 @@ from typing import Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-try:
-    from flash_attn import flash_attn_qkvpacked_func, flash_attn_kvpacked_func, flash_attn_varlen_kvpacked_func
-    from flash_attn.bert_padding import index_first_axis
-except ImportError:
-    flash_attn_qkvpacked_func, flash_attn_kvpacked_func, flash_attn_varlen_kvpacked_func = None, None, None
-    index_first_axis = None
 from packaging import version
 from transformers.utils.import_utils import _is_package_available
 
@@ -23,10 +17,6 @@ def reshape_for_broadcast(freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]], x
 
     This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
     for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    Notes:
-        When using FlashMHAModified, head_first should be False.
-        When using Attention, head_first should be True.
 
     Args:
         freqs_cis (Union[torch.Tensor, Tuple[torch.Tensor]]): Frequency tensor to be reshaped.
@@ -114,7 +104,7 @@ def apply_rotary_emb(
 
 
 class BasicAttentionLayer(nn.Module):
-    def __init__(self, attn_mode='flash', deterministic=False):
+    def __init__(self, attn_mode='torch', deterministic=False):
         super().__init__()
         self.attn_mode = attn_mode
         self.deterministic = deterministic
@@ -130,14 +120,6 @@ class BasicAttentionLayer(nn.Module):
 
 
 MEMORY_LAYOUT = {
-    "self_flash": (
-        lambda x: x,
-        lambda x: x,
-    ),
-    "cross_flash": (
-        lambda x: x,
-        lambda x: x,
-    ),
     "torch": (
         lambda x: x.transpose(1, 2),
         lambda x: x.transpose(1, 2),
@@ -149,82 +131,28 @@ MEMORY_LAYOUT = {
 }
 
 
-# Copyed from https://github.com/huggingface/transformers/blob/b873234cb649a24865021f0d598627ce2b24d34a/src/transformers/modeling_flash_attention_utils.py#L33C1-L57C6
-def _get_unpad_data(attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, int]:
-    """
-    Retrieves indexing data required to repad unpadded (ragged) tensors.
-
-    Arguments:
-        attention_mask (`torch.Tensor`):
-            Boolean or int tensor of shape (batch_size, sequence_length), 1 means valid and 0 means not valid.
-
-    Return:
-        indices (`torch.Tensor):
-            The indices of non-masked tokens from the flattened input sequence.
-        cu_seqlens (`torch.Tensor`):
-            The cumulative sequence lengths, used to index into ragged (unpadded) tensors. `cu_seqlens` shape is (batch_size + 1,).
-        max_seqlen_in_batch (`int`):
-            Maximum sequence length in batch.
-    """
-    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
-    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
-    max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
-    return (
-        indices,
-        cu_seqlens,
-        max_seqlen_in_batch,
-    )
-
-
-# Copyed from https://github.com/huggingface/transformers/blob/b873234cb649a24865021f0d598627ce2b24d34a/src/transformers/utils/import_utils.py#L822
-def is_flash_attn_greater_or_equal(library_version: str):
-    if not _is_package_available("flash_attn"):
-        return False
-
-    return version.parse(importlib.metadata.version("flash_attn")) >= version.parse(library_version)
-
-
-def get_kv_seqlens_with_mask(attn_mask, k, v):
-    indices_k, cu_seqlens_k, max_seqlen_k = _get_unpad_data(attn_mask)
-    b, s1, a, d = k.shape
-    k = index_first_axis(k.reshape(b * s1, a, d), indices_k)
-    v = index_first_axis(v.reshape(b * s1, a, d), indices_k)
-    kv = torch.stack([k, v], dim=1)
-    return cu_seqlens_k, max_seqlen_k, kv
-
-
-def get_q_seqlens(q):
-    bs, s, a, d = q.shape
-    cu_seqlens_q = torch.arange(0, (bs + 1) * s, step=s, dtype=torch.int32, device=q.device)
-    q = q.reshape(bs * s, a, d)
-    return cu_seqlens_q, s, q
-
-
 def attention(q, k, v, mode, drop_rate=0, attn_mask=None, causal=False, deterministic=False,
               cu_seqlens=None, max_seqlen=None, cu_seqlens_k=None, max_seqlen_k=None):
     """
-    Perform QKV self attention.
+    Perform QKV attention.
 
     Args:
         q (torch.Tensor): Query tensor with shape [b, s, a, d], where a is the number of heads.
         k (torch.Tensor): Key tensor with shape [b, s1, a, d]
         v (torch.Tensor): Value tensor with shape [b, s1, a, d]
-        mode (str): Attention mode. Choose from 'self_flash', 'cross_flash', 'torch', and 'vanilla'.
+        mode (str): Attention mode. Choose from 'torch' and 'vanilla'.
         drop_rate (float): Dropout rate in attention map. (default: 0)
         attn_mask (torch.Tensor): Attention mask with shape [b, s1] (cross_attn), or [b, a, s, s1] (torch or vanilla).
             (default: None)
         causal (bool): Whether to use causal attention. (default: False)
         deterministic (bool): Whether to use deterministic attention. (default: False)
-        cu_seqlens (torch.Tensor): dtype torch.int32. The cumulative sequence lengths of the sequences in the batch,
-            used to index into q.
-        max_seqlen (int): The maximum sequence length in the batch of q.
-        cu_seqlens_k (torch.Tensor): dtype torch.int32. The cumulative sequence lengths of the sequences in the batch,
-            used to index into kv.
-        max_seqlen_k (int): The maximum sequence length in the batch of k and v.
+        cu_seqlens (torch.Tensor): Not used in non-flash attention modes.
+        max_seqlen (int): Not used in non-flash attention modes.
+        cu_seqlens_k (torch.Tensor): Not used in non-flash attention modes.
+        max_seqlen_k (int): Not used in non-flash attention modes.
 
     Returns:
-        torch.Tensor: Output tensor after self attention with shape [b, s, ad]
+        torch.Tensor: Output tensor after attention with shape [b, s, ad]
     """
     pre_attn_layout, post_attn_layout = MEMORY_LAYOUT[mode]
     q = pre_attn_layout(q)
@@ -280,7 +208,7 @@ class SelfAttentionLayer(BasicAttentionLayer):
                  dtype=None,
                  device=None,
                  norm_type='layer',
-                 attn_mode='self_flash',
+                 attn_mode='torch',
                  deterministic=False,
                  ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -290,11 +218,6 @@ class SelfAttentionLayer(BasicAttentionLayer):
         assert self.dim % num_heads == 0, "dim must be divisible by num_heads"
         self.head_dim = self.dim // num_heads
         self.attn_drop = attn_drop
-
-        # This assertion is aligned with flash attention
-        assert (
-            self.head_dim % 8 == 0 and self.head_dim <= 128
-        ), "Only support head_dim <= 128 and divisible by 8"
 
         self.Wqkv = nn.Linear(dim, dim * 3, bias=qkv_bias, **factory_kwargs)
 
@@ -363,7 +286,7 @@ class CrossAttentionLayer(BasicAttentionLayer):
                  dtype=None,
                  device=None,
                  norm_type='layer',
-                 attn_mode='cross_flash',
+                 attn_mode='torch',
                  deterministic=False,
                  ):
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -374,11 +297,6 @@ class CrossAttentionLayer(BasicAttentionLayer):
         assert self.qdim % num_heads == 0, "qdim must be divisible by num_heads"
         self.head_dim = self.qdim // num_heads
         self.attn_drop = attn_drop
-
-        # This assertion is aligned with flash attention
-        assert (
-                self.head_dim % 8 == 0 and self.head_dim <= 128
-        ), "Only support head_dim <= 128 and divisible by 8"
 
         self.q_proj = nn.Linear(qdim, qdim, bias=qkv_bias, **factory_kwargs)
         self.kv_proj = nn.Linear(kdim, 2 * qdim, bias=qkv_bias, **factory_kwargs)
