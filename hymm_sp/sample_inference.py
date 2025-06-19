@@ -103,9 +103,6 @@ class HunyuanVideoSampler(Inference):
         pixel_value_llava = kwargs.get("pixel_value_llava", None)
         uncond_pixel_value_llava = kwargs.get("uncond_pixel_value_llava", None)
         ref_latents = kwargs.get("ref_latents", None)
-        bg_latents = kwargs.get("bg_latents", None)
-        audio_prompts = kwargs.get("audio_prompts", None)
-        audio_strength = kwargs.get("audio_strength", 1.0)
         uncond_ref_latents = kwargs.get("uncond_ref_latents", None)
         name = kwargs.get("name", None)
         cpu_offload = kwargs.get("cpu_offload", 0)
@@ -139,10 +136,11 @@ class HunyuanVideoSampler(Inference):
         # ---------------------------------
         # Other arguments
         # ---------------------------------
-        scheduler = FlowMatchDiscreteScheduler(shift=flow_shift,
-                                                reverse=self.args.flow_reverse,
-                                                solver=self.args.flow_solver,
-                                                )
+        scheduler = FlowMatchDiscreteScheduler(
+            shift=flow_shift,
+            reverse=self.args.flow_reverse,
+            solver=self.args.flow_solver,
+        )
         self.pipeline.scheduler = scheduler
 
         # ---------------------------------
@@ -224,9 +222,6 @@ class HunyuanVideoSampler(Inference):
                                 generator=generator,
                                 prompt_embeds=prompt_embeds,
                                 ref_latents=ref_latents,
-                                bg_latents=bg_latents,
-                                audio_prompts=audio_prompts,
-                                audio_strength=audio_strength,
                                 latents=init_latents,
                                 denoise_strength=denoise_strength,
                                 mask=mask,
@@ -254,4 +249,3 @@ class HunyuanVideoSampler(Inference):
         gen_time = time.time() - start_time
         logger.info(f"Success, time: {gen_time}")
         return out_dict
-    
