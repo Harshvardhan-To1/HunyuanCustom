@@ -45,6 +45,7 @@ class Inference(object):
     def from_pretrained(cls, 
                         pretrained_model_path,
                         args,
+                        models_base=None,
                         device=None,
                         **kwargs):
         """
@@ -68,15 +69,11 @@ class Inference(object):
         factor_kwargs = {'device': 'cpu' if args.cpu_offload else device, 'dtype': PRECISION_TO_TYPE[args.precision]}
         in_channels = args.latent_channels
         out_channels = args.latent_channels
-        video_condition = args.video_condition
-        audio_condition = args.audio_condition
         print("="*25, f"build model", "="*25)
         model = load_model(
             args,
             in_channels=in_channels,
             out_channels=out_channels,
-            video_condition=video_condition,
-            audio_condition=audio_condition,
             factor_kwargs=factor_kwargs
         )
         if args.use_fp8:
@@ -93,7 +90,7 @@ class Inference(object):
         # ============================= Build extra models ========================
         # VAE
         print("="*25, f"load vae", "="*25)
-        vae, _, s_ratio, t_ratio = load_vae(args.vae, args.vae_precision, logger=logger, device='cpu' if args.cpu_offload else device)
+        vae, _, s_ratio, t_ratio = load_vae(models_base, args.vae, args.vae_precision, logger=logger, device='cpu' if args.cpu_offload else device)
         vae_kwargs = {'s_ratio': s_ratio, 't_ratio': t_ratio}
         
         # Text encoder
@@ -106,7 +103,8 @@ class Inference(object):
         # prompt_template_video
         prompt_template_video = PROMPT_TEMPLATE[args.prompt_template_video] if args.prompt_template_video is not None else None
         print("="*25, f"load llava", "="*25)
-        text_encoder = TextEncoder(text_encoder_type = args.text_encoder,
+        text_encoder = TextEncoder(models_base,
+                                   text_encoder_type = args.text_encoder,
                                    max_length = max_length,
                                    text_encoder_precision = args.text_encoder_precision,
                                    tokenizer_type = args.tokenizer,
@@ -120,7 +118,8 @@ class Inference(object):
                                    )
         text_encoder_2 = None
         if args.text_encoder_2 is not None:
-            text_encoder_2 = TextEncoder(text_encoder_type=args.text_encoder_2,
+            text_encoder_2 = TextEncoder(models_base,
+                                         text_encoder_type=args.text_encoder_2,
                                          max_length=args.text_len_2,
                                          text_encoder_precision=args.text_encoder_precision_2,
                                          tokenizer_type=args.tokenizer_2,
@@ -152,7 +151,7 @@ class Inference(object):
             pass
         else:
             raise KeyError(f"Key '{load_key}' not found in the checkpoint. Existed keys: {state_dict.keys()}")
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
         return model
 
     def get_exp_dir_and_ckpt_id(self):
