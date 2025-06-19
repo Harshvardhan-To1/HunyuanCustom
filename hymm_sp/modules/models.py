@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers.models import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 from .activation_layers import get_activation_layer
 from .norm_layers import get_norm_layer
@@ -28,6 +27,60 @@ from .parallel_states import (
 CPU_OFFLOAD = int(os.environ.get("CPU_OFFLOAD", 0))
 DISABLE_SP = int(os.environ.get("DISABLE_SP", 0))
 print(f'models: cpu_offload={CPU_OFFLOAD}, DISABLE_SP={DISABLE_SP}')
+
+
+def standard_attention(q, k, v, dropout_p=0.0, is_causal=False):
+    """
+    Standard scaled dot-product attention implementation.
+    
+    Args:
+        q: Query tensor [batch_size * seq_len, num_heads, head_dim]
+        k: Key tensor [batch_size * seq_len, num_heads, head_dim]  
+        v: Value tensor [batch_size * seq_len, num_heads, head_dim]
+        dropout_p: Dropout probability
+        is_causal: Whether to apply causal masking
+        
+    Returns:
+        Attention output tensor
+    """
+    # Transpose to [num_heads, batch_size * seq_len, head_dim] for attention computation
+    q = q.transpose(0, 1)  # [num_heads, batch_size * seq_len, head_dim]
+    k = k.transpose(0, 1)  # [num_heads, batch_size * seq_len, head_dim]
+    v = v.transpose(0, 1)  # [num_heads, batch_size * seq_len, head_dim]
+    
+    # Use PyTorch's scaled_dot_product_attention
+    attn_output = F.scaled_dot_product_attention(
+        q, k, v, 
+        dropout_p=dropout_p,
+        is_causal=is_causal
+    )
+    
+    # Transpose back to [batch_size * seq_len, num_heads, head_dim]
+    attn_output = attn_output.transpose(0, 1)
+    
+    return attn_output
+
+
+def flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, dropout_p=0.0, causal=False):
+    """
+    Replacement for flash_attn_varlen_func using standard PyTorch attention.
+    
+    Args:
+        q: Query tensor [total_seq_len, num_heads, head_dim]
+        k: Key tensor [total_seq_len, num_heads, head_dim]
+        v: Value tensor [total_seq_len, num_heads, head_dim]
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_kv: Cumulative sequence lengths for keys/values
+        max_seqlen_q: Maximum sequence length in batch for queries
+        max_seqlen_kv: Maximum sequence length in batch for keys/values
+        dropout_p: Dropout probability
+        causal: Whether to use causal attention
+        
+    Returns:
+        Attention output tensor
+    """
+    return standard_attention(q, k, v, dropout_p=dropout_p, is_causal=causal)
+
 
 class DoubleStreamBlock(nn.Module):
     def __init__(
